@@ -47,3 +47,71 @@ miss); 77 tests.
   to HTTP 409.
 - **F8 (hook, noted for Round 3):** with an empty `forge.secret`, webhook verification
   must fail closed (reject unsigned requests), never accept.
+
+---
+
+## Round 2 — execution layer: fixes F1–F6, shell/gitops/render/odoo_cli/pg
+
+**Design deviation (documented):** flow logic lives in Python
+(`core/flows.py`, coming in Round 3) instead of the planned bash scripts — the
+bash "kit" becomes a thin human/cron entrypoint. Reason: a dual bash+Python
+implementation of the same operational sequences is a defect factory; the Python
+steps are unit-testable and DRY_RUN-verified, while the runbook keeps hand-run
+instructions. The plan's intent (human-runnable ops, engine-agnostic core) is
+preserved.
+
+**Built**:
+- `core/shell.py`: subprocess executor — global dry-run switch, line-streaming
+  logs, bounded output capture, `::` marker collection, secret redaction
+  (values masked in echo lines and env dumps), probe-with-retries, env *merge*
+  (never replace PATH/HOME).
+- `core/gitops.py`: mirror fetch (flock-serialized), `refs/heads/*` sha
+  resolution (mirror clones carry branches directly — no `origin/*` refs),
+  worktree add/reset/remove, changed-module diff parser with third_party flag,
+  apps.txt/requirements readers, escalation rule.
+- `core/render.py` + `envd/templates/{odoo.conf,compose.odoo.yml}.tpl`:
+  per-env project rendering with the docker-entrypoint contract asserted on
+  every render (conf must NOT contain db_* keys — the image entrypoint injects
+  them from HOST/PORT/USER/PASSWORD env vars; studied at odoo/docker
+  20.0/entrypoint.sh).
+- `core/odoo_cli.py`: native command wrappers (db init/dump/load/duplicate/drop,
+  module install/upgrade/list incl. `--outdated`, neutralize) — exact subcommand
+  shapes verified against `cli/db.py` / `cli/module.py`; `module list` parser
+  handles two-word states ("to upgrade") and skips log noise; health probe via
+  `compose exec python3 -c urllib`.
+- `core/pg.py`: per-env role admin, exec'd *inside the infra postgres
+  container* (no host port, no engine-side password), SQL-safe charset
+  enforcement.
+- `tools/pw.py`: SQL-safe credential generation.
+- Tests: 129 total (real-git integration for mirror/worktree/diff, render
+  contract, command shapes under dry-run, shell redaction/failure/probe).
+
+**Fixed during the round** (gates/tests):
+- shell echo line leaked secrets (only streamed output was masked) — the
+  initial `$ cmd` echo is now masked too (caught by the pg command-shape test).
+- mirror ref semantics: `origin/<branch>` doesn't exist in `--mirror` clones;
+  all lookups now use `refs/heads/<branch>`.
+- `parse_module_list` broke on two-word states ("to upgrade") and accepted log
+  noise as modules; rewritten with state validation.
+- changed-module parser treated stray files directly under `addons/` as
+  modules; now requires a file *inside* a module dir (≥3 path parts).
+- render: stray `$` in the direct-port compose injection; env vars must merge,
+  not replace, the ambient environment (real-run PATH bug).
+- gitops: missing-branch `rev-parse` raised raw ShellError before the friendly
+  GitError; now mapped explicitly.
+- several of my own bad test expectations (escalation threshold math, duplicate
+  TOML tables, pg password charset, compose arg order).
+
+**Review findings — to fix in Round 3:**
+- **F9 (shell, diagnostics):** output truncation keeps the head; error tails
+  need the end — add a bounded tail ring.
+- **F10 (shell, robustness):** non-FileNotFoundError OSErrors from Popen
+  (e.g. PermissionError) escape raw — wrap in ShellError.
+- **F11 (render, correctness):** empty `image_tag` renders `image:` — validate
+  before writing.
+- **F12 (pg, idempotency):** ensure-flow needs `db_exists()` (via
+  `pg_database`) to guard `db init` — the CLI refuses existing databases.
+- **F13 (flows, contract):** flows must stop the service before `db load
+  --force`, tolerate `worktree_remove` failure, warn when apps.txt is missing,
+  and check `role_exists` before creating.
+- **F14 (hook, security):** empty `forge.secret` must fail closed.

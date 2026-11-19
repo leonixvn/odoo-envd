@@ -130,6 +130,7 @@ class TestBackups:
         assert len(store.list_backups("feature/x", kind="daily")) == 1
         removed = store.prune_backups("feature/x", "pre-deploy", keep=3)
         assert len(removed) == 2
+        assert {path for _, path in removed} == {"/b/0.zip", "/b/1.zip"}
         remaining = store.list_backups("feature/x", kind="pre-deploy")
         assert len(remaining) == 3
         assert remaining[0]["sha"] == "s4"  # newest kept

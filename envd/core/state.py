@@ -263,6 +263,8 @@ class Store:
 
     def supersede_queued(self, kinds: tuple[str, ...], env_branch: str, before_id: int) -> int:
         """Mark older queued jobs of one env as superseded (newest-sha-wins)."""
+        if not kinds:
+            raise StoreError("supersede_queued requires at least one job kind")
         with self._lock, self._cx:
             cur = self._cx.execute(
                 "UPDATE jobs SET state = 'superseded', finished_at = ?"
@@ -317,19 +319,21 @@ class Store:
             cur = self._cx.execute("DELETE FROM backups WHERE id = ?", (backup_id,))
             return bool(cur.rowcount)
 
-    def prune_backups(self, env_branch: str, kind: str, keep: int) -> list[int]:
-        """Delete the oldest backups beyond the retention count; returns removed ids."""
+    def prune_backups(self, env_branch: str, kind: str, keep: int) -> list[tuple[int, str]]:
+        """Drop rows beyond the retention count; returns removed ``(id, path)`` pairs
+        so the caller can unlink the zip files from disk."""
         with self._lock, self._cx:
             rows = self._cx.execute(
-                "SELECT id FROM backups WHERE env_branch = ? AND kind = ?"
+                "SELECT id, path FROM backups WHERE env_branch = ? AND kind = ?"
                 " ORDER BY id DESC LIMIT -1 OFFSET ?",
                 (env_branch, kind, keep),
             ).fetchall()
-            ids = [row["id"] for row in rows]
-            if ids:
+            removed = [(row["id"], row["path"]) for row in rows]
+            if removed:
+                ids = [rid for rid, _ in removed]
                 marks = ",".join("?" * len(ids))
                 self._cx.execute(f"DELETE FROM backups WHERE id IN ({marks})", ids)
-        return ids
+        return removed
 
     # ---------------------------------------------------------- events --
 

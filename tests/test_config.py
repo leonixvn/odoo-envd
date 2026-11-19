@@ -73,7 +73,9 @@ def test_invalid_values_rejected(tmp_path: Path, extra: str):
 def test_overridden_path_is_honoured(tmp_path: Path):
     toml = tmp_path / "envd.toml"
     body = MINIMAL_TOML.format(root=tmp_path / "srv")
-    body = body.replace("[paths]\n", "")  # drop the default section before overriding
+    # drop the default [paths] section entirely, then provide an override
+    lines = [ln for ln in body.splitlines() if ln != "[paths]" and not ln.startswith("root = ")]
+    body = "\n".join(lines) + "\n"
     body += (
         f"\n[paths]\nroot = '{tmp_path / 'srv'}'\n"
         f"mirror = '{tmp_path / 'alt' / 'repo.git'}'\n"

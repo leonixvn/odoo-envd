@@ -111,6 +111,11 @@ def set_dry_run(value: bool) -> None:
     _DRY_RUN = value
 
 
+def dry_run_active() -> bool:
+    """Read the global dry-run switch."""
+    return _DRY_RUN
+
+
 def load_config(path: str | Path) -> Config:
     """Load and validate envd.toml. Raises ConfigError with actionable messages."""
     p = Path(path)
@@ -151,7 +156,10 @@ def load_config(path: str | Path) -> Config:
     for name in protect:
         if not name or name.startswith("-"):
             raise ConfigError(f"[policy] invalid protected branch name {name!r}")
-    port_lo, port_hi = policy_raw.get("port_range", Policy().port_range)
+    port_range = policy_raw.get("port_range", Policy().port_range)
+    if not isinstance(port_range, (list, tuple)) or len(port_range) != 2:
+        raise ConfigError(f"[policy] port_range must be [low, high], got {port_range!r}")
+    port_lo, port_hi = int(port_range[0]), int(port_range[1])
     if not (1024 <= port_lo < port_hi <= 65535):
         raise ConfigError(f"[policy] port_range invalid: ({port_lo}, {port_hi})")
     strategy = policy_raw.get("upgrade_strategy", Policy().upgrade_strategy)
@@ -160,6 +168,10 @@ def load_config(path: str | Path) -> Config:
     failure = policy_raw.get("on_deploy_failure", Policy().on_deploy_failure)
     if failure not in ("rollback", "halt"):
         raise ConfigError(f"[policy] on_deploy_failure must be 'rollback'|'halt', got {failure!r}")
+    max_slug_len = _positive(policy_raw, "max_slug_len", Policy().max_slug_len)
+    if max_slug_len > 59:
+        # names are prefixed env_ and PostgreSQL identifiers are limited to 63 chars
+        raise ConfigError("[policy] max_slug_len must be <= 59 (env_ prefix + PG 63-char limit)")
     policy = Policy(
         protect=protect,
         prune_ttl_days=_positive(policy_raw, "prune_ttl_days", Policy().prune_ttl_days),
@@ -170,7 +182,7 @@ def load_config(path: str | Path) -> Config:
         language=str(policy_raw.get("language", "en_US")),
         upgrade_strategy=strategy,
         on_deploy_failure=failure,
-        max_slug_len=_positive(policy_raw, "max_slug_len", Policy().max_slug_len),
+        max_slug_len=max_slug_len,
         job_workers=_positive(policy_raw, "job_workers", Policy().job_workers),
         job_lock_timeout=_positive(policy_raw, "job_lock_timeout", Policy().job_lock_timeout),
         port_range=(int(port_lo), int(port_hi)),
@@ -185,7 +197,11 @@ def load_config(path: str | Path) -> Config:
 def _build_paths(root: Path, section: dict) -> Paths:
     def child(key: str, default: str) -> Path:
         value = section.get(key)
-        return Path(value).expanduser() if value else root / default
+        if value is None:
+            return root / default
+        # relative overrides resolve against root, never against the process CWD
+        p = Path(str(value)).expanduser()
+        return p if p.is_absolute() else root / p
 
     return Paths(
         root=root,
@@ -201,8 +217,11 @@ def _build_paths(root: Path, section: dict) -> Paths:
 
 def _section(raw: dict, name: str, cls):
     data = dict(raw.get(name, {}))
-    valid_fields = {f for f in cls.__dataclass_fields__ if f in data}
-    return cls(**{f: data[f] for f in valid_fields})
+    unknown = set(data) - set(cls.__dataclass_fields__)
+    if unknown:
+        # typos (e.g. admin_passwd) must fail loudly, not silently use defaults
+        raise ConfigError(f"[{name}] unknown keys: {sorted(unknown)}")
+    return cls(**data)
 
 
 def _forge_type(value: str) -> ForgeType:
