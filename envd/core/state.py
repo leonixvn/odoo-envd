@@ -42,6 +42,9 @@ CREATE TABLE IF NOT EXISTS envs (
     workers         INTEGER NOT NULL DEFAULT 0,
     direct_port     INTEGER,
     admin_password  TEXT,
+    pg_password     TEXT,
+    deps_hash       TEXT,
+    installed_count INTEGER,
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL
 );
@@ -134,16 +137,17 @@ class Store:
         seed: str | None = None,
         image_tag: str | None = None,
         admin_password: str | None = None,
+        pg_password: str | None = None,
         pinned: bool = False,
     ) -> dict[str, Any]:
         now = utcnow()
         with self._lock, self._cx:
             self._cx.execute(
                 "INSERT INTO envs (branch, slug, db_name, url, state, pinned, with_demo,"
-                " seed, image_tag, admin_password, created_at, updated_at)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                " seed, image_tag, admin_password, pg_password, created_at, updated_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (branch, slug, db, url, "creating", int(pinned), int(with_demo), seed,
-                 image_tag, admin_password, now, now),
+                 image_tag, admin_password, pg_password, now, now),
             )
         return self.get_env(branch)  # type: ignore[return-value]
 
@@ -180,7 +184,8 @@ class Store:
         allowed = {
             "state", "pinned", "with_demo", "seed", "last_sha", "last_deploy_at",
             "deploy_count", "image_tag", "upgrade_strategy", "on_deploy_failure",
-            "workers", "direct_port", "admin_password",
+            "workers", "direct_port", "admin_password", "pg_password", "deps_hash",
+            "installed_count",
         }
         unknown = set(fields) - allowed
         if unknown:

@@ -16,6 +16,7 @@ import os
 import shlex
 import subprocess
 import time
+from collections import deque
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 
@@ -24,6 +25,7 @@ from envd.config import dry_run_active
 MASK = "***"
 SECRET_ENV_KEYS = frozenset({"PASSWORD", "PGPASSWORD", "ADMIN_PASSWORD"})
 MAX_OUTPUT_CHARS = 200_000
+TAIL_LINES = 50
 
 
 class ShellError(RuntimeError):
@@ -42,6 +44,7 @@ class RunResult:
     rc: int
     duration: float
     output: str = ""
+    tail: str = ""
     dry_run: bool = False
     # lines that carry kit → engine state markers (parsed by the job runner)
     markers: list[str] = field(default_factory=list)
@@ -89,7 +92,35 @@ class Shell:
         self._log(line)
         if dry_run_active():
             return RunResult(rc=0, duration=0.0, dry_run=True)
+        return self._spawn(cmd, cwd=cwd, env=env, timeout=timeout, check=check)
 
+    def run_read(
+        self,
+        cmd: list[str],
+        *,
+        cwd: str | None = None,
+        timeout: int | None = None,
+        check: bool = True,
+    ) -> RunResult:
+        """Execute a *plan-safe* command even in dry-run mode.
+
+        Reserved for local git queries against the mirror (rev-parse, diff,
+        ``git show``) and the mirror fetch itself: they only refresh engine-side
+        bookkeeping, cannot mutate any environment, and keep dry-run plans
+        realistic. Everything else must use :meth:`run`, which dry-run echoes.
+        """
+        self._log(self._mask(self._fmt_cmd(cmd, None)) + "   # read-only")
+        return self._spawn(cmd, cwd=cwd, env=None, timeout=timeout, check=check)
+
+    def _spawn(
+        self,
+        cmd: list[str],
+        *,
+        cwd: str | None,
+        env: dict[str, str] | None,
+        timeout: int | None,
+        check: bool,
+    ) -> RunResult:
         started = time.monotonic()
         # merge with the ambient environment: replacing it entirely would drop
         # PATH/HOME and break git, docker, etc.
@@ -105,11 +136,13 @@ class Shell:
                 text=True,
                 bufsize=1,
             )
-        except FileNotFoundError as exc:
-            raise ShellError(cmd, 127, f"binary not found: {exc}") from exc
+        except OSError as exc:
+            # FileNotFoundError, PermissionError, … — wrap, never leak raw
+            raise ShellError(cmd, 126, f"cannot execute: {exc}") from exc
 
         chunks: list[str] = []
         total = 0
+        tail = deque(maxlen=TAIL_LINES)
         markers: list[str] = []
         assert proc.stdout is not None
         for raw in proc.stdout:
@@ -117,6 +150,7 @@ class Shell:
             if clean.startswith("::"):
                 markers.append(clean)
             self._log(self._mask(clean))
+            tail.append(clean + "\n")
             if total < MAX_OUTPUT_CHARS:
                 chunks.append(clean + "\n")
                 total += len(chunks[-1])
@@ -131,11 +165,16 @@ class Shell:
             rc=rc,
             duration=time.monotonic() - started,
             output="".join(chunks),
+            tail="".join(tail),
             markers=markers,
         )
         if check and rc != 0:
-            raise ShellError(cmd, rc, result.output)
+            raise ShellError(cmd, rc, result.tail)
         return result
+
+    def log(self, message: str) -> None:
+        """Log a free-form engine line into the job log (used by flows)."""
+        self._log(message)
 
     def capture(
         self,

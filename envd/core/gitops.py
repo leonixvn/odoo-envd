@@ -79,10 +79,14 @@ class GitOps:
             )
 
     def fetch(self) -> RunResult:
-        """Fetch+prune the forge remote, serialized across all envs."""
+        """Fetch+prune the forge remote, serialized across all envs.
+
+        Plan-safe: the fetch only refreshes the local mirror (engine
+        bookkeeping), so it runs even in dry-run mode.
+        """
         self._require_mirror()
         lock = self.mirror.parent / ".mirror-fetch.lock"
-        return self.shell.run(
+        return self.shell.run_read(
             ["flock", str(lock), "git", "-C", str(self.mirror),
              "fetch", "--prune", "origin"],
             timeout=600,
@@ -95,7 +99,7 @@ class GitOps:
         are no ``origin/*`` remote-tracking refs in a --mirror clone).
         """
         self._require_mirror()
-        result = self.shell.run(
+        result = self.shell.run_read(
             ["git", "-C", str(self.mirror), "rev-parse", f"refs/heads/{branch}"],
             check=False,
         )
@@ -136,26 +140,44 @@ class GitOps:
         )
 
     def changed_modules(self, slug: str, old_sha: str, new_sha: str) -> tuple[list[str], bool]:
-        """Module names changed between two shas + whether third_party was touched."""
-        out = self.shell.capture(
-            ["git", "-C", str(self.worktree_path(slug)), "diff", "--name-only",
-             old_sha, new_sha, "--", "addons", "third_party"]
-        )
+        """Module names changed between two shas + whether third_party was touched.
+
+        Runs against the mirror (the source of truth) — the worktree may be
+        mid-transition; the bare mirror always has both trees.
+        """
+        out = self.shell.run_read(
+            ["git", "-C", str(self.mirror), "diff", "--name-only",
+             old_sha, new_sha, "--", "addons", "third_party"],
+            check=False,
+        ).output
         return changed_modules_from_lines(out.splitlines() if out else [])
 
-    def apps(self, slug: str) -> list[str]:
-        """The branch's install list; empty means 'install base only'."""
-        apps_file = self.worktree_path(slug) / "apps.txt"
-        if not apps_file.is_file():
-            return []
-        return parse_apps_txt(apps_file.read_text(encoding="utf-8"))
+    def read_branch_file(self, branch: str, path: str) -> str | None:
+        """File content at ``refs/heads/<branch>`` in the mirror, or None.
 
-    def requirements_hash(self, slug: str) -> str:
+        Reading from the mirror (not the worktree) is deliberate: the worktree
+        may be mid-transition, and dry-run plans never materialize it — the
+        mirror is always the source of truth.
+        """
+        self._require_mirror()
+        result = self.shell.run_read(
+            ["git", "-C", str(self.mirror), "show", f"refs/heads/{branch}:{path}"],
+            check=False,
+        )
+        return result.output if result.rc == 0 else None
+
+    def apps(self, branch: str) -> list[str]:
+        """The branch's install list; empty means 'install base only'."""
+        text = self.read_branch_file(branch, "apps.txt")
+        return parse_apps_txt(text) if text else []
+
+    def requirements_hash(self, branch: str) -> str:
         """Content hash of the branch's requirements.txt ('' when absent)."""
-        req = self.worktree_path(slug) / "requirements.txt"
-        if not req.is_file():
+        text = self.read_branch_file(branch, "requirements.txt")
+        if text is None:
             return ""
-        return hashlib.sha256(req.read_bytes()).hexdigest()
+        # normalize the trailing newline so cosmetic edits don't rebuild images
+        return hashlib.sha256(text.strip().encode()).hexdigest()
 
     def escalate_to_full_upgrade(
         self, changed: list[str], touched_third_party: bool, installed: int

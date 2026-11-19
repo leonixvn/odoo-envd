@@ -43,6 +43,9 @@ def render_env(
 
     Returns the written paths. Raises RenderError on template contract issues.
     """
+    if not image_tag:
+        raise RenderError("image_tag must be a non-empty docker tag")
+
     project_dir = cfg.paths.envs / slug / "project"
     project_dir.mkdir(parents=True, exist_ok=True)
     worktree = cfg.paths.envs / slug / "repo"

@@ -196,9 +196,10 @@ class TestRealGit:
 
     def test_apps_and_requirements(self, repo, ops):
         ops.fetch()
-        ops.worktree_add("feature_x", "feature/x")
-        assert ops.apps("feature_x") == ["crm", "sale_management"]
-        assert ops.requirements_hash("feature_x") != ""
+        assert ops.apps("feature/x") == ["crm", "sale_management"]
+        assert ops.requirements_hash("feature/x") != ""
+        assert ops.requirements_hash("main") != ops.requirements_hash("feature/x")
+        assert ops.read_branch_file("feature/x", "no-such-file.txt") is None
 
     def test_escalation_rule(self, ops):
         assert ops.escalate_to_full_upgrade([], False, 100) is False

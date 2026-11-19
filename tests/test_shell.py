@@ -57,7 +57,7 @@ class TestRealRun:
 
     def test_missing_binary(self):
         sh = Shell()
-        with pytest.raises(ShellError, match="binary not found"):
+        with pytest.raises(ShellError, match="cannot execute"):
             sh.run(["/no/such/binary", "--x"])
 
     def test_env_is_merged_not_replaced(self):

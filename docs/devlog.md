@@ -115,3 +115,62 @@ preserved.
   --force`, tolerate `worktree_remove` failure, warn when apps.txt is missing,
   and check `role_exists` before creating.
 - **F14 (hook, security):** empty `forge.secret` must fail closed.
+
+---
+
+## Round 3 — engine heart: flows, job runner, forge adapters
+
+**Built**:
+- `core/flows.py`: operational step sequences — **ensure** (fetch → worktree →
+  role → deps-image → render → db init *or* seed duplicate → module install →
+  up → health + installed-count), **deploy** (fetch → diff → safety dump →
+  upgrade with auto-rollback → recreate → health), **destroy**, **backup**
+  (with retention), **rollback** (pre-deploy / latest / by id). Rollback
+  semantics per the verified odoo receipts: upgrades commit per-module
+  (`loading.py:236-253`), so failure recovery = restore point, never "run old
+  code on new schema".
+- `core/jobs.py`: JobRunner — thread pool, per-env flock, newest-sha-wins at
+  submit (older queued deploys superseded), step-by-step job tracking with
+  logs at `envd/logs/<id>.log` (secrets redacted), cancellation at step
+  boundaries, env-state policy (RolledBack ⇒ env stays *running* on the
+  previous sha).
+- `core/forge.py`: GitHub/GitLab/Gitea push adapters, HMAC sha256 / token
+  verification (constant time), **fail closed on empty secret**, repo
+  allowlist, tags and invalid branch names ignored, deletion triggers
+  (github/gitea `deleted:true`, gitlab zero-`after`).
+- Dry-run semantics hardened with a `shell.run_read()` tier: **plan-safe**
+  commands (git rev-parse/diff/show, mirror fetch — engine bookkeeping that
+  cannot mutate envs) execute even in dry-run, so plans are realistic;
+  everything else is echoed only. `changed_modules` now diffs against the
+  **mirror** (source of truth) instead of the worktree; `apps.txt`/
+  `requirements.txt` are read via `git show refs/heads/<branch>:<path>`.
+- Tests: 157 total, including end-to-end job runs under dry-run with real git
+  (ensure→deploy→rollback→destroy), per-env lock serialization, log
+  redaction, forge signature matrices.
+
+**Fixed during the round** (gates/tests):
+- dry-run flaw: read helpers returned empty under dry-run, so flows couldn't
+  plan; introduced the run_read plan-safe tier (found via ensure failing on
+  sha resolution).
+- forge `_verify` crashed with AttributeError on *missing* headers instead
+  of refusing (fail-closed path was untested until now).
+- flows read repo content from a worktree that dry-run never materializes →
+  now read from the mirror via `git show`.
+- invalid annotation syntax, private shell member access, hardcoded escalation
+  count (now the real installed count from `odoo module list`, stored on the
+  env row — also useful to the future API).
+
+**Review findings — fixed immediately (both safety-critical):**
+- **FL-A (flows, real bug):** the deploy auto-rollback restored the DB while
+  the env container was still connected — `db load --force` drops the
+  database and PostgreSQL refuses to drop while sessions exist; the env would
+  also have been left with containers down. The rollback branch now stops
+  the service, restores, restarts, re-probes health, and only then reports
+  RolledBack (env keeps serving the previous sha — the promise, now true).
+- **FL-B (flows):** backup `kind` was unvalidated (an API caller could forge
+  `pre-deploy` rows); now restricted to `manual|daily`.
+
+**Carried to Round 4:** API + CLI + remaining API-facing flows (duplicate,
+neutralize, import), SSE, docs/api-contract.md; kit bash shim; cancel-race
+hardening (running jobs only stop at step boundaries — acceptable, to
+document).

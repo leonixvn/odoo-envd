@@ -21,6 +21,9 @@ ROLE_OK = re.compile(r"^[a-z0-9_]{1,50}$")
 PASSWORD_OK = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
 
 
+DB_NAME_OK = re.compile(r"^[a-z0-9_]{1,63}$")
+
+
 class PgError(ValueError):
     pass
 
@@ -71,4 +74,14 @@ class PgAdmin:
             f"SELECT 1 FROM pg_roles WHERE rolname = '{role}';", check=False
         )
         # psql prints "(1 row)" under the result grid when a row matched
+        return result.rc == 0 and "(1 row)" in result.output
+
+    def db_exists(self, db_name: str) -> bool:
+        """True when the database exists (guards `odoo db init`, which refuses
+        existing databases)."""
+        if not DB_NAME_OK.match(db_name):
+            raise PgError(f"invalid database name {db_name!r}")
+        result = self._psql(
+            f"SELECT 1 FROM pg_database WHERE datname = '{db_name}';", check=False
+        )
         return result.rc == 0 and "(1 row)" in result.output
