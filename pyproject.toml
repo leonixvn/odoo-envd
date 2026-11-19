@@ -44,7 +44,8 @@ select = [
     "RUF", # ruff-specific
 ]
 ignore = [
-    "SIM108",  # ternary is not always clearer
+    "B008",   # FastAPI idiom: Depends(...) calls in argument defaults
+    "SIM108", # ternary is not always clearer
 ]
 
 [tool.pytest.ini_options]

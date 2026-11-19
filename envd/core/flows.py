@@ -22,7 +22,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from envd.config import Config
+from envd.config import Config, dry_run_active
 from envd.core.gitops import GitOps
 from envd.core.odoo_cli import OdooCLI, parse_module_list
 from envd.core.pg import PgAdmin
@@ -30,6 +30,7 @@ from envd.core.render import render_env
 from envd.core.shell import Shell, ShellError
 from envd.core.state import Store, utcnow
 from envd.tools.slug import db_name as env_db_name
+from envd.tools.slug import db_slug
 
 
 class FlowError(RuntimeError):
@@ -161,8 +162,11 @@ def _ensure_database(ctx: FlowContext) -> None:
         return
     seed = ctx.env.get("seed") or ctx.params.get("seed")
     if seed:
-        source_db = env_db_name(seed)
-        ctx.odoo.db_duplicate(source_db, force=True, neutralize=bool(ctx.params.get("neutralize")))
+        # seed is stored as a BRANCH name; DB names derive from its slug
+        source_db = env_db_name(db_slug(seed, max_len=ctx.cfg.policy.max_slug_len))
+        ctx.odoo.db_duplicate(
+            source_db, force=True, neutralize=bool(ctx.params.get("neutralize"))
+        )
         ctx.flow["db_created"] = True
         ctx.flow["from_seed"] = True
         return
@@ -203,10 +207,15 @@ def _installed_count(ctx: FlowContext) -> int:
 def _ensure_health(ctx: FlowContext) -> None:
     if not ctx.odoo.health_wait():
         raise FlowError(f"env {ctx.env['branch']} did not become healthy in time")
-    ctx.env = ctx.store.update_env(
-        ctx.env["branch"], state="running", last_sha=ctx.flow.get("new_sha"),
-        last_deploy_at=utcnow(), installed_count=_installed_count(ctx),
-    )
+    fields: dict = {
+        "state": "running",
+        "last_deploy_at": utcnow(),
+        "installed_count": _installed_count(ctx),
+    }
+    # import flows reuse this step without a fresh sha — never wipe last_sha
+    if ctx.flow.get("new_sha"):
+        fields["last_sha"] = ctx.flow["new_sha"]
+    ctx.env = ctx.store.update_env(ctx.env["branch"], **fields)
     ctx.emit("env.created", {"branch": ctx.env["branch"], "url": ctx.env["url"]})
 
 
@@ -233,7 +242,8 @@ def _deploy_fetch(ctx: FlowContext) -> None:
 
 def _deploy_diff(ctx: FlowContext) -> None:
     old, new = ctx.flow.get("old_sha"), ctx.flow["new_sha"]
-    if old == new:
+    if old == new and not ctx.params.get("mode"):
+        # no new commits and no explicit API mode — nothing to deploy
         _log(ctx, f"env {ctx.env['branch']} already at {new} — nothing to deploy")
         ctx.flow["noop"] = True
         ctx.flow["changed"], ctx.flow["third_party"] = [], False
@@ -265,7 +275,9 @@ def _deploy_safety_dump(ctx: FlowContext) -> None:
 def _deploy_upgrade(ctx: FlowContext) -> None:
     if ctx.flow.get("noop"):
         return
-    strategy = ctx.env.get("upgrade_strategy") or ctx.cfg.policy.upgrade_strategy
+    # explicit mode from the API/webhook wins over the env/config strategy
+    mode = ctx.params.get("mode")
+    strategy = mode or ctx.env.get("upgrade_strategy") or ctx.cfg.policy.upgrade_strategy
     escalation = ctx.git.escalate_to_full_upgrade(
         ctx.flow["changed"], ctx.flow["third_party"],
         installed=ctx.env.get("installed_count") or 50,
@@ -273,6 +285,8 @@ def _deploy_upgrade(ctx: FlowContext) -> None:
     try:
         if strategy == "outdated":
             ctx.odoo.module_upgrade(["all"], outdated_only=True)
+        elif strategy == "full":
+            ctx.odoo.module_upgrade(["all"])
         elif escalation:
             _log(ctx, "escalating to full upgrade (third_party churn or broad change)")
             ctx.odoo.module_upgrade(["all"])
@@ -359,8 +373,6 @@ def _destroy_worktree(ctx: FlowContext) -> None:
 
 def _destroy_cleanup(ctx: FlowContext) -> None:
     project = ctx.cfg.paths.envs / _slug(ctx)
-    from envd.config import dry_run_active
-
     if not dry_run_active():
         # filesystem destruction only in real mode: in dry-run the git and
         # docker commands above were echoed, not run — removing their targets
@@ -465,11 +477,138 @@ def _rollback_start(ctx: FlowContext) -> None:
 def _rollback_health(ctx: FlowContext) -> None:
     if not ctx.odoo.health_wait():
         raise FlowError(f"env {ctx.env['branch']} did not become healthy after rollback")
-    ctx.env = ctx.store.update_env(
-        ctx.env["branch"], state="running", last_sha=ctx.flow.get("rollback_sha"),
-        last_deploy_at=utcnow(),
-    )
+    fields: dict = {"state": "running", "last_deploy_at": utcnow()}
+    if ctx.flow.get("rollback_sha"):
+        fields["last_sha"] = ctx.flow["rollback_sha"]
+    ctx.env = ctx.store.update_env(ctx.env["branch"], **fields)
     ctx.emit("env.rolled_back", {"branch": ctx.env["branch"], "sha": ctx.env["last_sha"]})
+
+
+# ------------------------------------------------------- neutralize/action
+
+
+def neutralize_flow(ctx: FlowContext) -> list[Step]:
+    return [Step("neutralize", _neutralize_db)]
+
+
+def _neutralize_db(ctx: FlowContext) -> None:
+    ctx.odoo.neutralize_db()
+    ctx.emit("env.neutralized", {"branch": ctx.env["branch"]})
+
+
+def action_flow(ctx: FlowContext) -> list[Step]:
+    return [Step("compose", _compose_action)]
+
+
+def _compose_action(ctx: FlowContext) -> None:
+    action = ctx.params.get("action")
+    if action not in ("start", "stop", "restart"):
+        raise FlowError(f"action must be start|stop|restart, got {action!r}")
+    ctx.odoo.compose_action(action)
+    ctx.store.update_env(ctx.env["branch"], state="running" if action != "stop" else "stopped")
+    ctx.emit("env.action", {"branch": ctx.env["branch"], "action": action})
+
+
+def obfuscate_flow(ctx: FlowContext) -> list[Step]:
+    return [Step("obfuscate", _obfuscate_db)]
+
+
+def _obfuscate_db(ctx: FlowContext) -> None:
+    password = ctx.params.get("pwd")
+    if not password:
+        raise FlowError("obfuscate requires 'pwd'")
+    ctx.shell.log(
+        "WARNING: odoo's own obfuscate tool states it is NOT safe for "
+        "third-party transfer — use for support dumps only"
+    )
+    ctx.odoo.obfuscate(
+        password,
+        fields=ctx.params.get("fields"),
+        unobfuscate=bool(ctx.params.get("unobfuscate")),
+        vacuum=bool(ctx.params.get("vacuum")),
+    )
+    ctx.emit("env.obfuscated", {"branch": ctx.env["branch"]})
+
+
+# ------------------------------------------------------------------ recreate
+
+
+def recreate_flow(ctx: FlowContext) -> list[Step]:
+    """Drop DB + role, then rebuild from the branch (fresh database)."""
+    prelude = [
+        Step("compose-down", _destroy_compose_down),
+        Step("drop-database", _destroy_database),
+        Step("drop-role", _destroy_role),
+    ]
+    return prelude + ensure_flow(ctx)
+
+
+# --------------------------------------------------------------------- import
+
+
+def import_flow(ctx: FlowContext) -> list[Step]:
+    """Restore an external dump (URL or uploaded file) into an env.
+
+    Native `odoo db load` (accepts URLs directly, cli/db.py:223-231); we
+    download server-side so the zip is in the env's backups/imports dir and
+    the container only ever reads local disk. Afterwards the env's code is
+    aligned to the restored database via `module upgrade all --outdated`.
+    """
+    return [
+        Step("fetch-dump", _import_fetch),
+        Step("db-load", _import_load),
+        Step("upgrade", _import_upgrade),
+        Step("compose-up", _ensure_compose_up),
+        Step("health", _ensure_health),
+    ]
+
+
+def _import_fetch(ctx: FlowContext) -> None:
+    dump_name = ctx.params.get("dump_file")
+    if dump_name:
+        # already server-side (upload or cross-env restore): verify it exists
+        host_path = ctx.cfg.paths.backups / _slug(ctx) / dump_name
+        if not host_path.is_file():
+            raise FlowError(f"dump file not found: {host_path}")
+        ctx.flow["dump_name"] = dump_name
+        return
+
+    dump_url = ctx.params.get("dump_url")
+    if not dump_url:
+        raise FlowError("import requires dump_url or dump_file")
+    base = dump_url.rstrip("/").rsplit("/", 1)[-1]
+    safe_chars = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
+    if not base or not set(base) <= safe_chars or base.startswith("."):
+        raise FlowError(f"unsafe dump filename derived from URL: {base!r}")
+    ctx.flow["dump_name"] = f"imports/{base}"
+    if dry_run_active():
+        return
+    import httpx
+
+    target = ctx.cfg.paths.backups / _slug(ctx) / "imports" / base
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with (
+        httpx.Client(follow_redirects=True, timeout=600) as client,
+        client.stream("GET", dump_url) as response,
+    ):
+        if response.status_code != 200:
+            raise FlowError(f"dump download failed: HTTP {response.status_code}")
+        with open(target, "wb") as fh:
+            for chunk in response.iter_bytes(65536):
+                fh.write(chunk)
+
+
+def _import_load(ctx: FlowContext) -> None:
+    ctx.odoo.db_load(
+        ctx.flow["dump_name"],
+        force=bool(ctx.params.get("force", True)),
+        neutralize=bool(ctx.params.get("neutralize")),
+    )
+
+
+def _import_upgrade(ctx: FlowContext) -> None:
+    # the restored DB was built from another code state: bring branch code up
+    ctx.odoo.module_upgrade(["all"], outdated_only=True)
 
 
 FLOWS: dict[str, Callable[[FlowContext], list[Step]]] = {
@@ -478,4 +617,9 @@ FLOWS: dict[str, Callable[[FlowContext], list[Step]]] = {
     "destroy": destroy_flow,
     "backup": backup_flow,
     "rollback": rollback_flow,
+    "neutralize": neutralize_flow,
+    "obfuscate": obfuscate_flow,
+    "action": action_flow,
+    "recreate": recreate_flow,
+    "import": import_flow,
 }

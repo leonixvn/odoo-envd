@@ -146,6 +146,7 @@ class JobRunner:
                 if env:
                     shell.add_redactions(env.get("pg_password"), env.get("admin_password"))
                 ctx = self._build_context(job, env, shell)
+                self.store.update_job(job_id, log_path=str(log_path))
                 self._run_job(job_id, ctx)
         finally:
             if lock:

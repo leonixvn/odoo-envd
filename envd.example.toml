@@ -1,0 +1,57 @@
+# odoo-envd configuration — copy to /etc/odoo-envd/envd.toml and edit.
+# All paths derive from [paths] root unless overridden (relative overrides
+# resolve against root). Secrets live ONLY here (chmod 600, root-owned).
+
+[server]
+# API binds here by default; expose it via Traefik/WireGuard for the GUI machine
+listen_host = "127.0.0.1"
+listen_port = 8100
+# Env hostnames: https://<slug-with-dashes>.<domain>  (wildcard DNS + ACME)
+domain = "odoo.example.com"
+
+[paths]
+root = "/srv/odoo"
+# mirror   = "/srv/odoo/repo.git"     # bare --mirror clone of the modules repo
+# envs     = "/srv/odoo/envs"        # worktrees + per-env compose projects
+# data     = "/srv/odoo/data"        # ONE data root: native filestore/<dbname>
+# backups  = "/srv/odoo/backups"     # native db dump zips + kit manifests
+# enterprise = "/srv/odoo/enterprise" # pinned clone, mounted :ro into envs
+# state_db = "/srv/odoo/envd/state.db"
+# logs     = "/srv/odoo/envd/logs"
+
+[forge]
+type = "github"                       # github | gitlab | gitea
+secret = "change-me-webhook-hmac"
+repos = ["acme/odoo-custom"]           # allowlist: full_name / path_with_namespace
+
+[postgres]
+# host/port as seen from the env containers (infra compose service name)
+host = "postgres"
+port = 5432
+# engine-side admin access, used only inside the infra postgres container
+admin_user = "postgres"
+
+[docker]
+# pin by DATE tag — nightly tags change under you; bump deliberately
+base_image = "odoo:20.0-20261112"
+compose_bin = "docker compose"
+
+[policy]
+protect = ["main", "master"]          # never auto-destroyed or pruned
+prune_ttl_days = 14                    # unpinned envs idle longer are destroyed
+with_demo = false                     # default for fresh envs
+country = ""                          # odoo db init --country
+language = "en_US"
+upgrade_strategy = "diff"             # diff (git-diff targeted) | outdated (version-bump driven)
+on_deploy_failure = "rollback"        # restore pre-deploy dump | halt for inspection
+weekly_full_upgrade = true            # Sunday timer: module upgrade all
+max_slug_len = 40                     # <= 59 (env_ prefix + PG 63-char limit)
+job_workers = 4
+job_lock_timeout = 600
+port_range = [8100, 8199]              # optional direct_port pool
+basic_auth_on_edge = true              # per-env traefik basic-auth until lifted
+
+[policy.retention]
+pre_deploy = 5
+daily = 7
+manual = 20

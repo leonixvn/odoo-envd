@@ -174,3 +174,53 @@ preserved.
 neutralize, import), SSE, docs/api-contract.md; kit bash shim; cancel-race
 hardening (running jobs only stop at step boundaries — acceptable, to
 document).
+
+---
+
+## Round 4 — the extensive REST API, CLI, kit shim, contract
+
+**Built**:
+- `api/` package: `create_app(cfg, store, runner)` + routers — envs (CRUD,
+  deploy/rollback/recreate/duplicate/neutralize/obfuscate/action/logs/modules/
+  health), backups (list/create/download/restore-in-place/cross-env-restore/
+  delete + `POST /imports` URL and raw-bytes upload), jobs (list/detail/logs/
+  cancel), system (info/healthz), `POST /api/hook` (HMAC push → ensure|
+  deploy|destroy, protected branches checked **before** any state access), SSE
+  `GET /api/events`. PAT bearer auth with the scope hierarchy; token rows are
+  sha256-hashed; env list/detail responses never leak the PG role password.
+- new flows: neutralize, obfuscate (with the tool's own third-party warning
+  in logs + contract), action (start/stop/restart), recreate, import (URL or
+  uploaded dump → `db load` + `module upgrade all --outdated`); deploy gained
+  an explicit `mode: full|outdated` override that bypasses the noop check.
+- `envd/__main__.py` CLI: serve, token create/list/delete, flow (foreground
+  — used by `kit/envd-kit.sh`), check. Kit bash shim added.
+- `docs/api-contract.md` (frozen, GUI-facing), `envd.example.toml`.
+
+**Fixed during the round** (all caught by the new API test suite):
+- **API-1 (real bug, routing):** `{branch}` path params don't match slashes —
+  every branch-scoped route 404'd for the canonical `feature/x` case. Redesign:
+  paths carry the **slug** (slash-free), bodies/responses carry the branch;
+  `_resolve_env` also accepts plain slash-free branch names. POST /api/envs now
+  returns the slug for the GUI. (Considered `{branch:path}` + global route
+  ordering — rejected as fragile across routers.)
+- **API-2 (real bug, data):** the duplicate/seed path built the source DB
+  name from the raw **branch** (`db duplicate env_feature/x …`) instead of the
+  slug-derived `env_feature_x` — nonexistent database in real mode. The exact-
+  command log assertion caught it; seed is now slug-mapped.
+- **API-3 (real bug, observability):** the runner never wrote `log_path` onto
+  the job row → `/api/jobs/{id}/logs` always returned empty. Now recorded at
+  execution start.
+- hook protection ordering: protected-branch refusal now precedes the env
+  lookup (the delete of a protected-but-uncreated branch must still say
+  "protected").
+- missing-token now correctly yields 401 (starlette) vs 403 (bad token);
+  tests updated to assert both.
+- `deploy mode=full` on an unchanged env was a silent noop — explicit modes
+  now force the deploy.
+- `require_runner` helper was referenced before definition → replaced with
+  the shared `get_runner` dependency.
+- multipart upload dropped in favour of raw-bytes + filename query param
+  (machine-to-machine, no `python-multipart` dependency).
+
+Gates: ruff clean, pytest 187 passed (60 API tests through TestClient,
+including webhook HMAC matrices and SSE).

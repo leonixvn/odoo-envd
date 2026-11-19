@@ -55,6 +55,15 @@ class ComposeCmd:
     def down(self) -> list[str]:
         return [*self.base(), "down", "--remove-orphans"]
 
+    def stop(self) -> list[str]:
+        return [*self.base(), "stop", "odoo"]
+
+    def start(self) -> list[str]:
+        return [*self.base(), "start", "odoo"]
+
+    def restart(self) -> list[str]:
+        return [*self.base(), "restart", "odoo"]
+
     def exec_odoo(self, cmd: list[str]) -> list[str]:
         return [*self.base(), "exec", "-T", "odoo", *cmd]
 
@@ -199,6 +208,38 @@ class OdooCLI:
 
     def compose_down(self) -> RunResult:
         return self.shell.run(self.compose.down(), timeout=600)
+
+    def compose_action(self, action: str) -> RunResult:
+        if action == "start":
+            cmd = self.compose.start()
+        elif action == "stop":
+            cmd = self.compose.stop()
+        elif action == "restart":
+            cmd = self.compose.restart()
+        else:
+            raise ValueError(f"unsupported compose action {action!r}")
+        return self.shell.run(cmd, timeout=600)
+
+    def obfuscate(
+        self,
+        password: str,
+        *,
+        fields: str | None = None,
+        unobfuscate: bool = False,
+        vacuum: bool = False,
+    ) -> RunResult:
+        """Native `odoo obfuscate` — PGP-ciphers business fields. The tool's own
+        source warns it is NOT safe for third-party transfer (cli/obfuscate.py:
+        124-150); used for support dumps only. `-y` skips the interactive
+        confirmations for automation."""
+        args = ["obfuscate", "-d", self.db, "--pwd", password, "-y"]
+        if fields:
+            args += ["--fields", fields]
+        if unobfuscate:
+            args.append("--unobfuscate")
+        if vacuum:
+            args.append("--vacuum")
+        return self.shell.run(self.compose.run_odoo(args), timeout=7200)
 
     def health_once(self) -> bool:
         """Single HTTP probe of the env's web client, exec'd in the container."""
