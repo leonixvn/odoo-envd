@@ -1,0 +1,38 @@
+# Infrastructure stack: edge (traefik) + postgres. Rendered/copied to
+# <root>/infra/docker-compose.yml by bootstrap.sh.
+services:
+  traefik:
+    image: traefik:v3
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      # ACME DNS challenge — set provider/credentials for your DNS host
+      - --certificatesresolvers.le.acme.email=ops@example.com
+      - --certificatesresolvers.le.acme.dnschallenge=true
+      - --certificatesresolvers.le.acme.dnschallenge.provider=cloudflare
+      - --certificatesresolvers.le.acme.storage=/letsencrypt/acme.json
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - letsencrypt:/letsencrypt
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=change-me-postgres
+      # per-env login roles are created by the engine; POSTGRES_USER is the
+      # engine-side admin used inside this container only (socket trust)
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+
+volumes:
+  letsencrypt:
+  pgdata:

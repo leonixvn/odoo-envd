@@ -36,6 +36,12 @@ def main(argv: list[str] | None = None) -> int:
     flow.add_argument("branch", nargs="?", default=None)
     flow.add_argument("--param", action="append", default=[], metavar="KEY=VALUE")
 
+    cron = sub.add_parser("cron", help="timer entrypoints (systemd units)")
+    cron_sub = cron.add_subparsers(dest="cron_mode", required=True)
+    cron_sub.add_parser("daily-backup", help="native db dump for every running env")
+    cron_sub.add_parser("prune", help="destroy stale unpinned envs")
+    cron_sub.add_parser("weekly-upgrade", help="module upgrade all for every running env")
+
     sub.add_parser("check", help="validate the config and print a summary")
 
     args = parser.parse_args(argv)
@@ -54,6 +60,8 @@ def main(argv: list[str] | None = None) -> int:
         return _token(cfg, args)
     if args.command == "flow":
         return _flow(cfg, args)
+    if args.command == "cron":
+        return _cron(cfg, args)
     if args.command == "check":
         return _check(cfg)
     return 1
@@ -142,6 +150,51 @@ def _flow(cfg, args) -> int:
     except FlowError as exc:
         print(f"flow error: {exc}", file=sys.stderr)
         return 1
+    finally:
+        store.close()
+
+
+def _cron(cfg, args) -> int:
+    """Timer entrypoints: loops over envs, foreground jobs, one summary line."""
+    from datetime import UTC, datetime, timedelta
+
+    from envd.core.jobs import JobRunner
+
+    store = _store_of(cfg)
+    runner = JobRunner(cfg, store)
+    outcomes: list[tuple[str, str]] = []
+    try:
+        envs = store.list_envs()
+        if args.cron_mode == "daily-backup":
+            for env in envs:
+                if env["state"] != "running":
+                    continue
+                job_id = runner.submit("backup", env["branch"], {"kind": "daily"}, foreground=True)
+                outcomes.append((env["branch"], store.get_job(job_id)["state"]))
+        elif args.cron_mode == "weekly-upgrade":
+            for env in envs:
+                if env["state"] != "running":
+                    continue
+                job_id = runner.submit("deploy", env["branch"], {"mode": "full"}, foreground=True)
+                outcomes.append((env["branch"], store.get_job(job_id)["state"]))
+        elif args.cron_mode == "prune":
+            ttl = timedelta(days=cfg.policy.prune_ttl_days)
+            now = datetime.now(UTC)
+            for env in envs:
+                if env["pinned"] or env["branch"] in cfg.policy.protect:
+                    continue
+                stamp = env.get("last_deploy_at") or env.get("created_at")
+                try:
+                    last = datetime.fromisoformat(stamp)
+                except (TypeError, ValueError):
+                    continue
+                if now - last.astimezone(UTC) < ttl:
+                    continue
+                job_id = runner.submit("destroy", env["branch"], {}, foreground=True)
+                outcomes.append((env["branch"], f"pruned:{store.get_job(job_id)['state']}"))
+        for branch, state in outcomes:
+            print(f"{branch}: {state}")
+        return 0
     finally:
         store.close()
 

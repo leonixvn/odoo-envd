@@ -416,6 +416,66 @@ class TestJobsAndEvents:
         assert "event: job.queued" in text or "event: env." in text or "keepalive" in text
 
 
+class TestImports:
+    def test_import_url_creates_new_env(self, server, tokens, ensured):
+        # the target branch must exist in the repo (env deploys its code)
+        _git(server["factory"].seed, "checkout", "-b", "feature/prod-repro")
+        server["factory"].commit(
+            {"README.md": "prod repro branch\n"}, branch="feature/prod-repro"
+        )
+        response = server["client"].post(
+            "/api/imports",
+            json={
+                "dump_url": "https://backups.example.com/prod.zip",
+                "target_branch": "feature/prod-repro",
+                "neutralize": True,
+            },
+            headers=auth(tokens["write"]),
+        )
+        assert response.status_code == 202
+        job = wait_job(server["store"], response.json()["job_id"])
+        assert job["state"] == "success", job["error"]
+        # the ensure-prelude ran: new env rendered before anything touched it
+        names = [s["name"] for s in job["steps"]]
+        assert names[:6] == ["fetch", "worktree", "pg-role", "deps-image", "render", "fetch-dump"]
+        log = (server["cfg"].paths.logs / f"{job['id']}.log").read_text()
+        assert "db load env_feature_prod_repro /mnt/backups/imports/prod.zip" in log
+        assert "--neutralize" in log
+        assert server["store"].get_env("feature/prod-repro")["state"] == "running"
+
+    def test_import_upload_raw_body(self, server, tokens, ensured):
+        _git(server["factory"].seed, "checkout", "-b", "feature/from-upload")
+        server["factory"].commit(
+            {"README.md": "upload target\n"}, branch="feature/from-upload"
+        )
+        response = server["client"].post(
+            "/api/imports/upload?target_branch=feature/from-upload&filename=dump.zip",
+            content=b"PK\x03\x04fake-zip",
+            headers=auth(tokens["write"]),
+        )
+        assert response.status_code == 202
+        job = wait_job(server["store"], response.json()["job_id"])
+        assert job["state"] == "success", job["error"]
+        saved = server["cfg"].paths.backups / "feature_from_upload" / "imports" / "dump.zip"
+        assert saved.read_bytes() == b"PK\x03\x04fake-zip"
+
+    def test_import_upload_rejects_unsafe_filename(self, server, tokens, ensured):
+        response = server["client"].post(
+            "/api/imports/upload?target_branch=feature/x&filename=../evil.zip",
+            content=b"x",
+            headers=auth(tokens["write"]),
+        )
+        assert response.status_code == 422
+
+    def test_import_requires_params(self, server, tokens, ensured):
+        response = server["client"].post(
+            "/api/imports",
+            json={"dump_url": "https://x.example/d.zip"},
+            headers=auth(tokens["write"]),
+        )
+        assert response.status_code == 422  # missing target_branch
+
+
 class TestSystem:
     def test_info(self, server, tokens):
         info = server["client"].get("/api/system/info", headers=auth(tokens["read"])).json()

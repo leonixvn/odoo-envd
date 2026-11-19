@@ -33,26 +33,28 @@ git push ──▶ forge webhook ──▶ odoo-envd ──▶ kit scripts ─�
 
 | Path | Purpose |
 |---|---|
-| `envd/` | FastAPI daemon: REST + SSE API, job runner (per-env flock), state store |
-| `kit/` | Operational bash scripts (also runnable by hand) + `odoo.conf` / compose templates |
-| `bootstrap/` | Server provisioning: docker/Traefik/Postgres, base image, systemd units + timers |
+| `envd/` | FastAPI daemon + core: REST + SSE API, job runner (per-env flock), state store, flows, native-CLI wrappers; per-env templates in `envd/templates/` |
+| `kit/` | `envd-kit.sh` — thin human/cron entrypoint into the same engine flows |
+| `bootstrap/` | Server provisioning: docker/Traefik/Postgres infra compose, base image, enterprise pin, systemd units + timers (backup/prune/weekly-upgrade) |
 | `docs/api-contract.md` | Frozen REST contract consumed by the future GUI module |
-| `docs/ops-runbook.md` | Human procedures: bootstrap, upgrade, recovery |
+| `docs/ops-runbook.md` | Human procedures: bootstrap, webhook, drills, recovery |
 | `docs/devlog.md` | Autonomous build-loop rounds: what was built, reviewed, fixed |
 
 ## Quick start (deploy server)
 
 ```bash
 # 1. bootstrap the server (docker, traefik, postgres, dirs, engine service)
-sudo ./bootstrap/bootstrap.sh
+sudo ./bootstrap/bootstrap.sh --modules-url git@github.com:acme/odoo-custom.git
 
-# 2. configure
-sudo cp envd.example.toml /etc/odoo-envd/envd.toml  # edit: domain, forge, secrets
+# 2. configure + restart
+sudo $EDITOR /etc/odoo-envd/envd.toml && sudo systemctl restart odoo-envd
 
 # 3. create an API token for the GUI
 envd token create --name gui --scopes admin
 
 # 4. register the forge webhook → http://<server>:8100/api/hook (HMAC secret from config)
+
+# timers (installed by bootstrap): nightly backup, daily prune, Sunday full upgrade
 ```
 
 ## Development

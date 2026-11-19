@@ -224,3 +224,55 @@ document).
 
 Gates: ruff clean, pytest 187 passed (60 API tests through TestClient,
 including webhook HMAC matrices and SSE).
+
+---
+
+## Round 5 — bootstrap layer, cron timers, CLI coverage, deep final review
+
+**Built**:
+- `bootstrap/bootstrap.sh` (idempotent server provisioning), infra compose
+  (Traefik + pinned `postgres:16`), `docker/Dockerfile.base` (pinned odoo:20 +
+  build tools for deps layers), `enterprise.ref` pin, systemd `odoo-envd.service`
+  + backup/prune/weekly timers.
+- `envd cron {daily-backup,prune,weekly-upgrade}` — the timer entrypoints,
+  looping envs foreground; prune respects pinned + protected and measures
+  staleness from last deploy.
+- `docs/ops-runbook.md`: bootstrap, webhook registration, manual ops, offsite
+  restore drill, prod→staging import, recovery paths, security notes.
+- Tests for the CLI surface (check/token/flow/cron) and the import endpoints.
+
+**Final review findings — fixed in this round:**
+- **R5-A (real bug):** `import_flow` lacked the ensure-prelude — importing
+  into a brand-new env would run `db load` against a compose project that was
+  never rendered and a worktree that didn't exist. Now: fetch → worktree →
+  role → deps-image → render → fetch-dump → stop → load → upgrade → up →
+  health.
+- **R5-B (real bug):** deploy never re-rendered, so `PATCH`ed workers/image
+  tag only took effect on the next *ensure*. Deploy now runs deps-image +
+  render steps (idempotent) before upgrading.
+- **R5-C:** `_rollback_resolve` blew up with raw `ValueError`s (garbage `to`
+  value, or a backup row whose file lives outside the env's backups dir) →
+  clean `FlowError`s; rollback-by-id is now also verified to belong to the
+  env (cross-env restores go through the import flow by design).
+- **R5-D:** `_backup_register` recorded `with_filestore=True` even for
+  `--no-filestore` dumps — the row metadata lied; now reflects the actual
+  dump.
+
+**Gates at close:** ruff clean; pytest **201 passed**
+(slug/port/config/state/shell/gitops-with-real-git/render/odoo-cli/pg/flows/
+jobs/forge/api/CLI), one known deprecation warning from starlette's
+TestClient shim (external).
+
+**Honest limits of this validation:** everything above runs under
+`ENVD_DRY_RUN` with **real git** — the docker/psql/odoo command sequences
+are asserted exactly, but no real container, Postgres or odoo binary was
+spawned in this environment. The plan's pilot (§8 of the design doc) —
+bootstrap on the deploy server and the five end-to-end checks including a
+deliberate crash-deploy — is the remaining validation step and needs the
+actual server.
+
+**Defect ledger across all rounds:** R1: 8 findings (F1-F8). R2: 14 found
+(F9-F14 + 7 in-round). R3: 2 safety-critical (FL-A/FL-B) + 7 in-round.
+R4: 3 real API bugs (routing slashes, seed DB name from raw branch, missing
+log_path) + 6 in-round. R5: 4 (import prelude, deploy re-render, rollback
+ValueErrors, backup metadata). All fixed; none deferred.

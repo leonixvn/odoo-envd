@@ -226,6 +226,8 @@ def deploy_flow(ctx: FlowContext) -> list[Step]:
     return [
         Step("fetch", _deploy_fetch),
         Step("diff", _deploy_diff),
+        Step("deps-image", _ensure_deps_image),
+        Step("render", _ensure_render),
         Step("safety-dump", _deploy_safety_dump),
         Step("upgrade", _deploy_upgrade),
         Step("recreate", _deploy_recreate),
@@ -405,10 +407,11 @@ def _backup_dump(ctx: FlowContext) -> None:
 def _backup_register(ctx: FlowContext) -> None:
     host_path = ctx.cfg.paths.backups / _slug(ctx) / ctx.flow["backup"]
     size = host_path.stat().st_size if host_path.exists() else None
+    with_filestore = bool(ctx.params.get("with_filestore", True))
     ctx.store.add_backup(
         env_branch=ctx.env["branch"], kind=ctx.flow["kind"], path=str(host_path),
         sha=ctx.env.get("last_sha"), image_tag=ctx.env.get("image_tag"),
-        with_filestore=True, size_bytes=size,
+        with_filestore=with_filestore, size_bytes=size,
     )
     keep = {
         "manual": ctx.cfg.policy.retention.manual,
@@ -441,14 +444,24 @@ def _rollback_resolve(ctx: FlowContext) -> None:
     elif to == "latest":
         backups = ctx.store.list_backups(ctx.env["branch"])
     else:
-        backups = [b for b in [ctx.store.get_backup(int(to))] if b]
+        try:
+            backup = ctx.store.get_backup(int(to))
+        except ValueError as exc:
+            raise FlowError(f"invalid rollback target {to!r}") from exc
+        backups = [backup] if backup and backup["env_branch"] == ctx.env["branch"] else []
     if not backups:
         raise FlowError(f"no backup found for rollback ({to})")
     backup = backups[0]  # list_backups is newest-first
     zip_path = Path(backup["path"])
     if not zip_path.exists():
         raise FlowError(f"backup file missing on disk: {zip_path}")
-    ctx.flow["backup_zip"] = zip_path.relative_to(ctx.cfg.paths.backups / _slug(ctx)).as_posix()
+    env_backups = ctx.cfg.paths.backups / _slug(ctx)
+    try:
+        ctx.flow["backup_zip"] = zip_path.relative_to(env_backups).as_posix()
+    except ValueError as exc:
+        raise FlowError(
+            f"backup file is outside this env's backups dir: {zip_path}"
+        ) from exc
     ctx.flow["rollback_sha"] = ctx.params.get("sha") or backup.get("sha")
     ctx.emit(
         "env.rolling_back",
@@ -549,13 +562,24 @@ def recreate_flow(ctx: FlowContext) -> list[Step]:
 def import_flow(ctx: FlowContext) -> list[Step]:
     """Restore an external dump (URL or uploaded file) into an env.
 
-    Native `odoo db load` (accepts URLs directly, cli/db.py:223-231); we
-    download server-side so the zip is in the env's backups/imports dir and
-    the container only ever reads local disk. Afterwards the env's code is
-    aligned to the restored database via `module upgrade all --outdated`.
+    The ensure-prelude (fetch, worktree, role, deps-image, render) makes this
+    work for a brand-new target env — the compose project and worktree must
+    exist before any odoo command can run; for existing envs every prelude
+    step is idempotent. Native `odoo db load` (accepts URLs directly,
+    cli/db.py:223-231); we download server-side so the container only ever
+    reads local disk. Afterwards the branch code is aligned via
+    `module upgrade all --outdated`. The service is stopped first —
+    `db load --force` drops the database, which PostgreSQL refuses while the
+    env container holds connections.
     """
     return [
+        Step("fetch", _ensure_fetch),
+        Step("worktree", _ensure_worktree),
+        Step("pg-role", _ensure_role),
+        Step("deps-image", _ensure_deps_image),
+        Step("render", _ensure_render),
         Step("fetch-dump", _import_fetch),
+        Step("stop", _destroy_compose_down),
         Step("db-load", _import_load),
         Step("upgrade", _import_upgrade),
         Step("compose-up", _ensure_compose_up),

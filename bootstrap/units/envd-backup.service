@@ -1,0 +1,8 @@
+[Unit]
+Description=odoo-envd nightly backup (native odoo db dump per env)
+After=odoo-envd.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/odoo/Projects/odoo-envd
+ExecStart=/home/odoo/Projects/odoo-envd/.venv/bin/envd cron daily-backup --config /etc/odoo-envd/envd.toml
