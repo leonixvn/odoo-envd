@@ -1,0 +1,28 @@
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+build/
+dist/
+
+# tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+coverage/
+
+# runtime artifacts (never commit engine state or backups)
+*.db
+*.db-wal
+*.db-shm
+.envd.local.toml
+state.db*
+logs/
+backups/
+
+# editors / os
+.idea/
+.vscode/
+*.swp
+.DS_Store
