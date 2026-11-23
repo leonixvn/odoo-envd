@@ -39,7 +39,14 @@ class SandboxTests(unittest.TestCase):
             labels[f"traefik.http.routers.{first['project']}.rule"], f"Host(`{first['hostname']}`)",
         )
         self.assertNotIn("ports", config["services"]["postgres"])
-        self.assertEqual(config["services"]["postgres"]["networks"], ["database"])
+        database_host = config["services"]["odoo"]["environment"]["PGHOST"]
+        self.assertEqual(database_host, f"{first['project']}-postgres")
+        self.assertEqual(
+            config["services"]["postgres"]["networks"],
+            {"database": {"aliases": [database_host]}},
+        )
+        second_config = json.loads((self.root / "second/compose.json").read_text())
+        self.assertNotEqual(database_host, second_config["services"]["odoo"]["environment"]["PGHOST"])
         self.assertTrue(config["networks"]["database"]["internal"])
         self.assertEqual(set(config["volumes"]), {"postgres", "odoo"})
         self.assertEqual((self.root / "first/sandbox.json").stat().st_mode & 0o777, 0o600)

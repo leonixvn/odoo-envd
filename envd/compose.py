@@ -22,6 +22,7 @@ def configuration(
     port: int, postgres_password: str, odoo_db_password: str, project: str, hostname: str,
     ingress_network: str,
 ) -> dict:
+    database_host = f"{project}-postgres"
     router = f"traefik.http.routers.{project}"
     redirect = f"{project}-redirect"
     return {
@@ -33,7 +34,7 @@ def configuration(
                     "POSTGRES_PASSWORD": postgres_password,
                 },
                 "volumes": ["postgres:/var/lib/postgresql/data"],
-                "networks": ["database"],
+                "networks": {"database": {"aliases": [database_host]}},
                 "healthcheck": {
                     "test": ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "postgres"],
                     "interval": "2s",
@@ -45,7 +46,7 @@ def configuration(
             "odoo": {
                 "image": ODOO_IMAGE,
                 "environment": {
-                    "PGHOST": "postgres",
+                    "PGHOST": database_host,
                     "PGPORT": "5432",
                     "PGUSER": "odoo",
                     "PGPASSWORD": odoo_db_password,
