@@ -14,9 +14,6 @@ class SandboxTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         self.manager = Sandboxes(self.root)
-        domain = patch.dict("os.environ", {"ENVD_DOMAIN": "example.com"})
-        domain.start()
-        self.addCleanup(domain.stop)
         ensure_proxy = patch("envd.proxy.ensure")
         ensure_proxy.start()
         self.addCleanup(ensure_proxy.stop)
@@ -30,14 +27,14 @@ class SandboxTests(unittest.TestCase):
         second = self.manager.create("second")
         self.assertNotEqual(first["project"], second["project"])
         self.assertNotEqual(first["hostname"], second["hostname"])
-        self.assertRegex(first["hostname"], r"^[0-9a-f]{16}\.example\.com$")
+        self.assertRegex(first["hostname"], r"^[0-9a-f]{16}\.greeni\.leonix\.cc$")
         self.manager.stop("first")
         self.assertEqual(self.manager.start("first")["hostname"], first["hostname"])
         self.assertEqual(self.manager.names(), ["first", "second"])
         config = json.loads((self.root / "first/compose.json").read_text())
         self.assertEqual(config["services"]["odoo"]["ports"], ["127.0.0.1:8069:8069"])
         labels = config["services"]["odoo"]["labels"]
-        self.assertEqual(labels["traefik.docker.network"], "odoo-envd-ingress")
+        self.assertEqual(labels["traefik.docker.network"], "coolify")
         self.assertEqual(
             labels[f"traefik.http.routers.{first['project']}.rule"], f"Host(`{first['hostname']}`)",
         )

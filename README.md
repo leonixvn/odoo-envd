@@ -10,7 +10,6 @@ Use Python 3.10+ and Docker Compose v2 with support for `up --wait`. Run the CLI
 on the Docker host as a user with Docker access. From this checkout:
 
 ```sh
-export ENVD_DOMAIN=odoo.example.com
 python3 -m envd create trial-a --port 8069
 python3 -m envd create trial-b
 python3 -m envd list
@@ -19,22 +18,23 @@ python3 -m envd credentials trial-b
 ```
 
 Each sandbox gets a random, persistent hostname such as
-`https://3d908af39dbd586c.odoo.example.com/web/login`. The CLI reports it as
+`https://3d908af39dbd586c.greeni.leonix.cc/web/login`. The CLI reports it as
 `url` and reports the loopback fallback as `local_url`. An explicit
 `--port` keeps the loopback URL fixed. When omitted, Docker selects a port.
 
 ### Host routing
 
-Point wildcard DNS for your base domain (for example `*.odoo.example.com`)
-to this host. On create or start, envd starts its own Traefik Compose
-project on TCP ports 80 and 443. If another listener occupies either port,
-envd fails before starting the sandbox. Use one engine state root per host.
+This branch targets Greeni. The `main` branch runs its own proxy on standalone hosts.
 
-Traefik discovers envd sandbox routes from Docker labels and obtains HTTPS
-certificates through HTTP-01. Its certificate storage persists across
-restarts. Odoo joins the proxy's ingress network. PostgreSQL remains on
-the sandbox's private database network with no published host port.
-HTTPS may take a moment to become ready after Odoo starts.
+The generated Compose project uses this host's Coolify Traefik proxy. Odoo
+joins the external `coolify` Docker network and advertises an HTTPS route
+with the proxy's `letsencrypt` resolver. The proxy obtains a certificate
+through HTTP-01 on port 80. Each PostgreSQL service stays on its private
+sandbox network and publishes no host port.
+
+The wildcard DNS record covers all generated names. HTTPS may take a moment
+to become ready after Odoo starts. Existing standalone sandboxes receive a
+hostname the next time they are started.
 
 ```sh
 python3 -m envd logs trial-a
