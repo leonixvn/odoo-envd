@@ -1,8 +1,0 @@
-[Unit]
-Description=odoo-envd weekly full upgrade (odoo module upgrade all per env)
-After=odoo-envd.service
-
-[Service]
-Type=oneshot
-WorkingDirectory=/home/odoo/Projects/odoo-envd
-ExecStart=/home/odoo/Projects/odoo-envd/.venv/bin/envd cron weekly-upgrade --config /etc/odoo-envd/envd.toml

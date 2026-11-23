@@ -1,74 +1,76 @@
 # odoo-envd
 
-CD engine for **Odoo branch→database environments**: every branch of your custom-modules
-repo becomes a full staging environment (git worktree + PostgreSQL database + Odoo
-service), deployed on push, destroyed on branch deletion — driven end-to-end by
-**native Odoo 20 tooling** (`odoo db init/dump/load/duplicate/drop`,
-`odoo module install/upgrade/list`, `odoo neutralize`) and exposed through a REST API.
+Manage multiple standalone Odoo sandboxes on one Linux Docker host. Each sandbox is a
+separate Compose project with its own Odoo service, PostgreSQL service, database
+network, database volume, and Odoo filestore volume.
 
-```
-git push ──▶ forge webhook ──▶ odoo-envd ──▶ kit scripts ──▶ odoo-bin inside each env's
-                    │                          │              docker compose project
-                    │                          └── worktree, per-env PG role, traefik route
-                    └── REST + SSE API  ◀── your Odoo GUI module (separate machine)
-```
+## Run it
 
-## Design contract
+Use Python 3.10+ and Docker Compose v2 with support for `up --wait`. Run the CLI
+on the Docker host as a user with Docker access. From this checkout:
 
-- **One env per branch**: worktree at `$root/envs/<slug>/repo` (bind-mounted `:ro`),
-  one PG database + role (`env_<slug>`), one compose project (`env_<slug>`), routed as
-  `https://<slug>.<domain>` by Traefik labels — zero edge configuration per env.
-- **Native-first**: backup = `odoo db dump` (zip with/without filestore), restore =
-  `odoo db load`, upgrade = `odoo module upgrade` (dependents cascade natively), fresh
-  env = `odoo db init` + `odoo module install $(apps.txt)`, seed = `odoo db duplicate`.
-  The engine stores only orchestration state (SQLite WAL) — never your data.
-- **Rollback first-class**: every deploy takes a `--no-filestore` safety dump before
-  upgrading; a failed upgrade auto-restores it (per-module commits make partial upgrades
-  a real state — restore is the only correct recovery). Manual rollback from any backup
-  is one API call.
-- **Engine repo ≠ modules repo**: developers control what Odoo runs; this repo controls
-  how it gets there. No secrets live in the modules repo.
-
-## Repository layout
-
-| Path | Purpose |
-|---|---|
-| `envd/` | FastAPI daemon + core: REST + SSE API, job runner (per-env flock), state store, flows, native-CLI wrappers; per-env templates in `envd/templates/` |
-| `kit/` | `envd-kit.sh` — thin human/cron entrypoint into the same engine flows |
-| `bootstrap/` | Server provisioning: docker/Traefik/Postgres infra compose, base image, enterprise pin, systemd units + timers (backup/prune/weekly-upgrade) |
-| `docs/api-contract.md` | Frozen REST contract consumed by the future GUI module |
-| `docs/ops-runbook.md` | Human procedures: bootstrap, webhook, drills, recovery |
-| `docs/devlog.md` | Autonomous build-loop rounds: what was built, reviewed, fixed |
-
-## Quick start (deploy server)
-
-```bash
-# 1. bootstrap the server (docker, traefik, postgres, dirs, engine service)
-sudo ./bootstrap/bootstrap.sh --modules-url git@github.com:acme/odoo-custom.git
-
-# 2. configure + restart
-sudo $EDITOR /etc/odoo-envd/envd.toml && sudo systemctl restart odoo-envd
-
-# 3. create an API token for the GUI
-envd token create --name gui --scopes admin
-
-# 4. register the forge webhook → http://<server>:8100/api/hook (HMAC secret from config)
-
-# timers (installed by bootstrap): nightly backup, daily prune, Sunday full upgrade
+```sh
+export ENVD_DOMAIN=odoo.example.com
+python3 -m envd create trial-a --port 8069
+python3 -m envd create trial-b
+python3 -m envd list
+python3 -m envd status trial-b
+python3 -m envd credentials trial-b
 ```
 
-## Development
+Each sandbox gets a random, persistent hostname such as
+`https://3d908af39dbd586c.odoo.example.com/web/login`. The CLI reports it as
+`url` and reports the loopback fallback as `local_url`. An explicit
+`--port` keeps the loopback URL fixed. When omitted, Docker selects a port.
 
-```bash
-uv venv && uv pip install -e . --group dev
-ruff check .
-pytest            # unit tests + kit dry-run suite (ENVD_DRY_RUN=1, no docker needed)
+### Host routing
+
+Point wildcard DNS for your base domain (for example `*.odoo.example.com`)
+to this host. On create or start, envd starts its own Traefik Compose
+project on TCP ports 80 and 443. If another listener occupies either port,
+envd fails before starting the sandbox. Use one engine state root per host.
+
+Traefik discovers envd sandbox routes from Docker labels and obtains HTTPS
+certificates through HTTP-01. Its certificate storage persists across
+restarts. Odoo joins the proxy's ingress network. PostgreSQL remains on
+the sandbox's private database network with no published host port.
+HTTPS may take a moment to become ready after Odoo starts.
+
+```sh
+python3 -m envd logs trial-a
+python3 -m envd stop trial-a
+python3 -m envd start trial-a
+python3 -m envd delete trial-a --yes
 ```
 
-The kit and the subprocess layer honour `ENVD_DRY_RUN=1`: commands are echoed, artifacts
-rendered, nothing executes — that is how the test suite exercises the full operational
-flow without a docker daemon.
+Stop retains data. Delete permanently removes that sandbox's PostgreSQL and
+filestore volumes. A failed create retains its saved state. Run `start` to
+retry or `delete --yes` to discard it. The first initialization runs with
+temporary database-creation permission, which the engine revokes before
+starting the Odoo web service. Cron is disabled for base trials.
 
-## License
+The engine uses the official Odoo 20 Community image and PostgreSQL 16. It stores
+local state under `${XDG_DATA_HOME:-~/.local/share}/odoo-envd` by default. Use
+`--root PATH` before the command to choose a different location. Keep this
+directory private. It holds credentials and maps sandboxes to their Compose
+projects. Credentials returned by the CLI are the initial credentials and
+will differ if the Odoo administrator changes the password.
 
-MIT — see [LICENSE](LICENSE).
+## Phases
+
+1. **Local sandbox lifecycle.** The CLI calls the lifecycle service in
+   `envd/sandbox.py`. Compose handles container, network, and volume operations.
+2. **Optional repository attachment.** A project sandbox will own PostgreSQL.
+   Each selected branch will get its own Odoo service, database, and checkout.
+3. **API.** A future API can call the lifecycle service used by the CLI.
+
+This rebuild starts with a new sandbox inventory. Existing deployments from
+the previous engine are outside that inventory. The new CLI does not migrate
+or remove them.
+
+## Verification
+
+Run `python3 -m unittest discover -s tests -v`. For a live smoke test, create
+two sandboxes, log in to both, and add a record and an attachment to each.
+Stop and start the first sandbox and verify its records and attachments.
+Delete the first sandbox and verify the second still serves its own data.

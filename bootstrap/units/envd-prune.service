@@ -1,8 +1,0 @@
-[Unit]
-Description=odoo-envd prune (destroy stale unpinned environments)
-After=odoo-envd.service
-
-[Service]
-Type=oneshot
-WorkingDirectory=/home/odoo/Projects/odoo-envd
-ExecStart=/home/odoo/Projects/odoo-envd/.venv/bin/envd cron prune --config /etc/odoo-envd/envd.toml
