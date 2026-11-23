@@ -7,6 +7,7 @@ import json
 import os
 import re
 import socket
+import subprocess
 from pathlib import Path
 
 from envd.compose import Compose, ComposeError
@@ -22,7 +23,24 @@ def domain() -> str:
     return value
 
 
+def _port_conflict(port: str | int) -> ComposeError:
+    return ComposeError(
+        f"TCP port {port} is already in use. "
+        "The standalone branch requires its own proxy on ports 80 and 443."
+    )
+
+
 def _check_ports() -> None:
+    published = subprocess.run(
+        ["docker", "ps", "--format", "{{.Ports}}"],
+        capture_output=True, text=True, check=False,
+    )
+    if published.returncode:
+        raise ComposeError(f"Could not inspect published Docker ports: {published.stderr.strip()}")
+    # Docker may publish through NAT without a host socket a bind probe can see.
+    occupied = re.search(r":(80|443)->\d+/tcp\b", published.stdout)
+    if occupied:
+        raise _port_conflict(occupied.group(1))
     for port in (80, 443):
         for family, address in ((socket.AF_INET, "0.0.0.0"), (socket.AF_INET6, "::")):
             try:
@@ -39,10 +57,7 @@ def _check_ports() -> None:
                 ):
                     continue
                 if exc.errno == errno.EADDRINUSE:
-                    raise ComposeError(
-                        f"TCP port {port} is already in use. "
-                        "The standalone branch requires its own proxy on ports 80 and 443."
-                    ) from exc
+                    raise _port_conflict(port) from exc
                 raise
 
 
